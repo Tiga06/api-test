@@ -1,47 +1,73 @@
 # Security Scanner API
 
-Flask API for security scanning tools on Kali Linux.
+Asynchronous Flask API for security scanning tools on Kali Linux with job management and rate limiting.
 
 ## Setup
 
 ```bash
-pip install flask
+pip install -r requirements.txt
 python f.py
 ```
 
 Server runs on `http://127.0.0.1:5000`
 
-## Endpoints
+## Common API Contract
 
-### WAF Detection
-```
-GET /wafcheck?domain=example.com
-```
+### Start Scan
+```bash
+POST /scan
+Content-Type: application/json
 
-### Network Mapping
-```
-GET /netmap?domain=example.com&type=1    # Lite scan
-GET /netmap?domain=example.com&type=2    # Deep scan
-```
-
-### Vulnerability Scanning
-```
-GET /nuclei?domain=example.com
+{
+  "tool": "nuclei",
+  "target": "example.com",
+  "params": {"type": "1"}
+}
 ```
 
-### Directory Enumeration
-```
-GET /drb?domain=example.com
+### Check Status
+```bash
+GET /status/{job_id}
 ```
 
-### Web Technology Detection
+### Get Results
+```bash
+GET /results/{job_id}
 ```
-GET /whtweb?domain=example.com
+
+### Cancel Scan
+```bash
+POST /cancel/{job_id}
 ```
+
+## Supported Tools
+
+- **wafw00f** - WAF Detection
+- **nmap** - Network Mapping (params: type=1|2)
+- **nuclei** - Vulnerability Scanning
+- **dirb** - Directory Enumeration
+- **whatweb** - Web Technology Detection
+- **nikto** - Web Vulnerability Scanner
+- **masscan** - Port Scanner (params: ports, rate)
+- **sslscan** - SSL/TLS Security Scanner (params: port)
+- **httpx** - HTTP Probing & Host Verification (params: screenshot, include_response, follow_redirects)
+
+## Management Endpoints
+
+- `GET /jobs` - List all jobs
+- `GET /health` - Health check
+- `GET /metrics` - Prometheus metrics
+
+## Features
+
+- **Asynchronous Processing** - Non-blocking scans
+- **Job Management** - Track scan progress
+- **Concurrent Limits** - Max 5 simultaneous scans
+- **Target Validation** - Scope registry checks
+- **Health Monitoring** - Built-in metrics
 
 ## Requirements
 
-- Kali Linux with tools: `wafw00f`, `nmap`, `nuclei`, `dirb`, `whatweb`
-- Python 3 with Flask
-
-All responses are JSON formatted with 4-space indentation.
+- Kali Linux with security tools installed
+- Python 3.8+ with Flask
+- All responses are JSON formatted with 4-space indentation
