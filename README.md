@@ -1,6 +1,6 @@
 # Security Scanner API
 
-Asynchronous Flask API for security scanning tools on Kali Linux with job management and rate limiting.
+Asynchronous Flask API for security scanning tools on Kali Linux with job management and comprehensive tool integration.
 
 ## Setup
 
@@ -51,6 +51,7 @@ POST /cancel/{job_id}
 - **masscan** - Port Scanner (params: ports, rate)
 - **sslscan** - SSL/TLS Security Scanner (params: port)
 - **httpx** - HTTP Probing & Host Verification (params: screenshot, include_response, follow_redirects)
+- **gvm** - OpenVAS Vulnerability Scanner (no timeout - runs until completion)
 
 ## Management Endpoints
 
@@ -65,9 +66,11 @@ POST /cancel/{job_id}
 - **Concurrent Limits** - Max 5 simultaneous scans
 - **Target Validation** - Scope registry checks
 - **Health Monitoring** - Built-in metrics
+- **Complete Scans** - GVM scans run until completion without timeout
 
 ## Requirements
 
 - Kali Linux with security tools installed
-- Python 3.8+ with Flask
+- Python 3.8+ with Flask and python-gvm
+- OpenVAS/GVM configured with user 'admeen:admin123'
 - All responses are JSON formatted with 4-space indentation
