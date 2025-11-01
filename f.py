@@ -9,6 +9,7 @@ import logging
 import threading
 import uuid
 import time
+from gvm.errors import GvmError
 from datetime import datetime
 from collections import OrderedDict
 
@@ -37,7 +38,8 @@ SUPPORTED_TOOLS = {
     'nikto': {'timeout': 1800, 'description': 'Web Vulnerability Scanner'},
     'masscan': {'timeout': 300, 'description': 'Port Scanner'},
     'sslscan': {'timeout': 120, 'description': 'SSL/TLS Security Scanner'},
-    'httpx': {'timeout': 60, 'description': 'HTTP Probing & Host Verification'}
+    'httpx': {'timeout': 60, 'description': 'HTTP Probing & Host Verification'},
+    'gvm': {'timeout': 3600, 'description': 'OpenVAS Vulnerability Scanner'}
 }
 
 def clean_ansi_codes(text):
@@ -287,7 +289,8 @@ def get_scan_function(tool):
         'nikto': run_nikto,
         'masscan': run_masscan,
         'sslscan': run_sslscan,
-        'httpx': run_httpx
+        'httpx': run_httpx,
+        'gvm': run_gvm
     }
     return functions.get(tool)
 
@@ -742,6 +745,282 @@ def run_httpx(target, params):
         }
     except Exception as e:
         return {"error": str(e)}
+
+def run_gvm(target, params):
+    """OpenVAS vulnerability scanning via GVM - merged from openvas_flask_api.py"""
+    try:
+        from gvm.connections import UnixSocketConnection, TLSConnection
+        from gvm.protocols.gmp import Gmp
+        from gvm.transforms import EtreeTransform
+        from gvm.errors import GvmError
+        import xml.etree.ElementTree as ET
+        
+        # Hardcoded credentials
+        username = 'admeen'
+        password = 'admin123'
+        
+        # Connection parameters
+        use_tls = params.get('use_tls', False)
+        host = params.get('host', 'localhost')
+        port = params.get('port', 9390)
+        socket_path = params.get('socket_path', '/run/gvmd/gvmd.sock')
+        
+        # Choose connection type
+        if use_tls:
+            connection = TLSConnection(hostname=host, port=port)
+        else:
+            # Check for socket existence
+            possible_sockets = [
+                socket_path,
+                '/var/run/gvmd.sock',
+                '/tmp/gvmd.sock',
+                '/run/gvm/gvmd.sock'
+            ]
+            
+            socket_found = None
+            for sock_path in possible_sockets:
+                if os.path.exists(sock_path):
+                    socket_found = sock_path
+                    break
+            
+            if not socket_found:
+                return {
+                    "error": "GVM socket not found",
+                    "checked_paths": possible_sockets,
+                    "solution": "Ensure OpenVAS/GVM is running: sudo systemctl start gvmd"
+                }
+            
+            connection = UnixSocketConnection(path=socket_found)
+        
+        transform = EtreeTransform()
+        
+        # Retry connection logic
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with Gmp(connection=connection, transform=transform) as gmp:
+                    # Authenticate
+                    gmp.authenticate(username, password)
+                    
+                    # Test connection with a simple command
+                    gmp.get_version()
+                    
+                    # Connection successful, proceed with scan
+                    return _perform_gvm_scan(gmp, target, params)
+                    
+            except (GvmError, ConnectionError, OSError) as e:
+                if attempt == max_retries - 1:
+                    return {
+                        "error": f"GVM connection failed after {max_retries} attempts: {str(e)}",
+                        "type": "connection_error",
+                        "troubleshooting": {
+                            "check_gvm_status": "sudo systemctl status gvmd",
+                            "restart_gvm": "sudo systemctl restart gvmd",
+                            "check_socket": f"ls -la {socket_found if not use_tls else 'N/A'}"
+                        }
+                    }
+                time.sleep(2 ** attempt)  # Exponential backoff
+                continue
+                
+    except ImportError:
+        return {
+            "error": "python-gvm library not installed",
+            "solution": "Run: pip install python-gvm"
+        }
+    except Exception as e:
+        return {
+            "error": f"OpenVAS scan failed: {str(e)}",
+            "troubleshooting": {
+                "check_gvm_status": "sudo systemctl status gvmd",
+                "start_gvm": "sudo systemctl start gvmd",
+                "check_socket": "ls -la /run/gvmd/gvmd.sock",
+                "check_credentials": "Verify GVM user 'admeen' exists with password 'admin123'"
+            }
+        }
+
+def _perform_gvm_scan(gmp, target, params):
+    """Perform the actual GVM scan after connection is established"""
+    try:
+        
+        # Create target with port range
+        target_name = f"API_Target_{target}_{int(time.time())}"
+        target_response = gmp.create_target(
+            name=target_name,
+            hosts=[target],
+            port_range="1-65535",
+            comment=f"API scan for {target}"
+        )
+            
+        # Extract target_id from XML response
+        target_id = target_response.get('id')
+        if not target_id:
+            # Look for ID in child elements
+            for child in target_response:
+                if child.get('id'):
+                    target_id = child.get('id')
+                    break
+        
+        if not target_id:
+            return {
+                "error": "Failed to create target - no target_id returned",
+                "xml_tag": target_response.tag,
+                "xml_attribs": dict(target_response.attrib),
+                "child_count": len(target_response)
+            }
+            
+        # Get scan config - prefer lighter scans for API
+        configs = gmp.get_scan_configs()
+        config_id = 'daba56c8-73ec-11df-a475-002264764cea'  # Full and fast fallback
+        
+        # Try to find a lighter config first
+        for config in configs.xpath('config'):
+            config_name = config.find('name')
+            if config_name is not None:
+                name = config_name.text
+                if 'Discovery' in name or 'Host Discovery' in name:
+                    config_id = config.get('id')
+                    break
+                elif 'Full and fast' in name:
+                    config_id = config.get('id')
+        
+        # Get default scanner
+        scanners = gmp.get_scanners()
+        scanner_id = scanners.xpath('scanner')[0].get('id')
+        
+        # Create task
+        task_name = f"API_Scan_{target}_{int(time.time())}"
+        task_response = gmp.create_task(
+            name=task_name,
+            config_id=config_id,
+            target_id=target_id,
+            scanner_id=scanner_id,
+            comment=f"Automated scan for {target}"
+        )
+        
+        # Extract task_id from XML response
+        task_id = task_response.get('id')
+        if not task_id:
+            # Look for ID in child elements
+            for child in task_response:
+                if child.get('id'):
+                    task_id = child.get('id')
+                    break
+        
+        if not task_id:
+            return {
+                "error": "Failed to create task - no task_id returned",
+                "target_id": target_id,
+                "xml_tag": task_response.tag
+            }
+        
+        # Start scan
+        start_response = gmp.start_task(task_id=task_id)
+        
+        # Extract report_id from XML response
+        report_id = start_response.get('id')
+        if not report_id:
+            # Look for ID in child elements
+            for child in start_response:
+                if child.get('id'):
+                    report_id = child.get('id')
+                    break
+        if not report_id:
+            report_id = 'unknown'
+        
+        # Wait for completion without timeout
+        wait_interval = 10
+        last_progress = '0'
+        
+        while True:
+            task_status = gmp.get_task(task_id)
+            status_elem = task_status.find('status')
+            status = status_elem.text if status_elem is not None else 'Unknown'
+            progress = task_status.find('progress')
+            progress_text = progress.text if progress is not None else '0'
+            
+            # Log progress for debugging
+            if progress_text != last_progress:
+                logger.info(f"GVM scan progress: {progress_text}% (status: {status})")
+                last_progress = progress_text
+            
+            if status in ['Done', 'Stopped', 'Interrupted']:
+                break
+                
+            time.sleep(wait_interval)
+        
+        # Get results
+        if status == 'Done':
+            # Get latest report
+            reports = gmp.get_reports(task_id=task_id)
+            if reports.xpath('report'):
+                report_id = reports.xpath('report')[0].get('id')
+                report = gmp.get_report(report_id=report_id)
+                
+                # Parse vulnerabilities
+                vulnerabilities = []
+                report_elem = report.find('report')
+                
+                if report_elem is not None:
+                    for result in report_elem.xpath('.//result'):
+                        vuln = {
+                            'name': result.find('name').text if result.find('name') is not None else 'Unknown',
+                            'host': result.find('host').text if result.find('host') is not None else target,
+                            'port': result.find('port').text if result.find('port') is not None else 'N/A',
+                            'severity': result.find('severity').text if result.find('severity') is not None else '0.0',
+                            'threat': result.find('threat').text if result.find('threat') is not None else 'Unknown',
+                            'description': result.find('description').text if result.find('description') is not None else 'No description available'
+                        }
+                        vulnerabilities.append(vuln)
+                
+                # Calculate severity counts
+                high_count = len([v for v in vulnerabilities if float(v['severity']) >= 7.0])
+                medium_count = len([v for v in vulnerabilities if 4.0 <= float(v['severity']) < 7.0])
+                low_count = len([v for v in vulnerabilities if 0.1 <= float(v['severity']) < 4.0])
+                
+                # Cleanup
+                try:
+                    gmp.delete_task(task_id=task_id)
+                    gmp.delete_target(target_id=target_id)
+                except:
+                    pass  # Ignore cleanup errors
+                
+                return {
+                    "tool": "gvm",
+                    "target": target,
+                    "task_name": task_name,
+                    "task_id": task_id,
+                    "report_id": report_id,
+                    "scan_status": status,
+                    "vulnerabilities": vulnerabilities,
+                    "summary": {
+                        "total_vulnerabilities": len(vulnerabilities),
+                        "high_severity": high_count,
+                        "medium_severity": medium_count,
+                        "low_severity": low_count
+                    }
+                }
+            else:
+                return {"error": "No report generated"}
+        else:
+            # Cleanup incomplete scan
+            try:
+                gmp.delete_task(task_id=task_id)
+                gmp.delete_target(target_id=target_id)
+            except:
+                pass
+            return {
+                "error": f"Scan completed with status: {status}",
+                "status": status
+            }
+    except GvmError as e:
+        return {
+            "error": f"GVM Error: {str(e)}",
+            "type": "gvm_error"
+        }
+    except Exception as e:
+        return {
+            "error": f"OpenVAS scan failed: {str(e)}"
+        }
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, threaded=True)
