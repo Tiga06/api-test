@@ -515,6 +515,75 @@ Comprehensive HTTP/HTTPS probing with technology detection.
 }
 ```
 
+### 10. OpenVAS Vulnerability Scanner (gvm)
+Comprehensive vulnerability scanning using OpenVAS engine.
+
+**Parameters:**
+- `socket_path`: GVM socket path (default: "/run/gvmd/gvmd.sock")
+- `use_tls`: Use TLS connection instead of socket (default: false)
+- `host`: GVM host for TLS connection (default: localhost)
+- `port`: GVM port for TLS connection (default: 9390)
+
+**Note:** 
+- Credentials are hardcoded (username: admeen, password: admin123)
+- GVM scans run without timeout until completion
+- Progress is logged to server console
+
+**Usage:**
+```json
+{
+    "tool": "gvm",
+    "target": "testphp.vulnweb.com",
+    "params": {
+        "socket_path": "/run/gvmd/gvmd.sock"
+    }
+}
+```
+
+**Output:**
+```json
+{
+    "tool": "gvm",
+    "target": "testphp.vulnweb.com",
+    "task_name": "API_Scan_testphp.vulnweb.com_1640995200",
+    "scan_status": "Done",
+    "vulnerabilities": [
+        {
+            "name": "SSL/TLS: Certificate Signed Using Weak Hashing Algorithm",
+            "severity": "5.0",
+            "host": "testphp.vulnweb.com",
+            "port": "443/tcp",
+            "description": "The remote SSL/TLS certificate is signed using a weak hashing algorithm...",
+            "threat": "Medium"
+        }
+    ],
+    "total_vulnerabilities": 15,
+    "high_severity": 2,
+    "medium_severity": 8,
+    "low_severity": 5
+}
+```
+
+**Requirements:**
+- OpenVAS/GVM installed and running
+- User must be in `_gvm` group or run as appropriate user
+- GVM daemon accessible via Unix socket
+
+**Setup:**
+```bash
+# Install OpenVAS
+sudo apt install openvas
+sudo gvm-setup
+
+# Start services
+sudo systemctl start gvmd
+sudo systemctl start gsad
+sudo systemctl start ospd-openvas
+
+# Add user to gvm group
+sudo usermod -a -G _gvm $USER
+```
+
 ---
 
 ## Management Endpoints
@@ -559,7 +628,7 @@ Health check endpoint for monitoring.
     "total_jobs": 150,
     "supported_tools": [
         "wafw00f", "nmap", "nuclei", "dirb", 
-        "whatweb", "nikto", "masscan", "sslscan", "httpx"
+        "whatweb", "nikto", "masscan", "sslscan", "httpx", "gvm"
     ],
     "timestamp": "2024-01-01T12:00:00Z"
 }
@@ -611,7 +680,7 @@ jobs_by_status{status="failed"} 5
 ```json
 {
     "error": "Invalid tool",
-    "supported_tools": ["wafw00f", "nmap", "nuclei", "dirb", "whatweb", "nikto", "masscan", "sslscan", "httpx"]
+    "supported_tools": ["wafw00f", "nmap", "nuclei", "dirb", "whatweb", "nikto", "masscan", "sslscan", "httpx", "gvm"]
 }
 ```
 
