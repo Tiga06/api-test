@@ -338,6 +338,7 @@ def list_jobs():
     }), 200
 
 @app.route('/health', methods=['GET'])
+@require_api_key
 def health_check():
     """Health check endpoint"""
     return jsonify({
@@ -349,6 +350,7 @@ def health_check():
     }), 200
 
 @app.route('/metrics', methods=['GET'])
+@require_api_key
 def metrics():
     """Prometheus-style metrics"""
     metrics_data = f"""# HELP active_scans Current number of active scans
@@ -1119,8 +1121,8 @@ def add_security_headers(response):
     response.headers['X-XSS-Protection'] = '1; mode=block'
     response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
     response.headers['Content-Security-Policy'] = "default-src 'self'"
-    # CORS - only allow https://conp.com
-    allowed_origin = os.environ.get('ALLOWED_ORIGIN', 'https://comp.com')
+    # CORS - only allow https://encoderspro.com
+    allowed_origin = os.environ.get('ALLOWED_ORIGIN', 'https://encoderspro.com')
     response.headers['Access-Control-Allow-Origin'] = allowed_origin
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key'
