@@ -9,7 +9,6 @@ import logging
 import threading
 import uuid
 import time
-from gvm.errors import GvmError
 from datetime import datetime
 from collections import OrderedDict
 
@@ -18,15 +17,67 @@ from collections import OrderedDict
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Audit logger for security events
+audit_logger = logging.getLogger('audit')
+audit_handler = logging.FileHandler('audit.log')
+audit_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+audit_logger.addHandler(audit_handler)
+audit_logger.setLevel(logging.INFO)
+
 app = Flask(__name__)
 
+# Security configuration
+app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024  # 1MB max request size
+API_KEY = os.environ.get('API_KEY', None)  # Set via environment variable
+REQUIRE_AUTH = os.environ.get('REQUIRE_AUTH', 'false').lower() == 'true'
 
+def require_api_key(f):
+    """Decorator to require API key authentication"""
+    from functools import wraps
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if REQUIRE_AUTH:
+            api_key = request.headers.get('X-API-Key')
+            if not api_key or api_key != API_KEY:
+                audit_logger.warning(f"Unauthorized access attempt from {request.remote_addr} to {request.path}")
+                return jsonify({"error": "Unauthorized - Invalid or missing API key"}), 401
+        return f(*args, **kwargs)
+    return decorated_function
 
 # Job management
 scan_jobs = OrderedDict()
+job_owners = {}  # Track job ownership by IP
 MAX_JOBS_HISTORY = 1000
 MAX_CONCURRENT_SCANS = 5
 active_scans = {"count": 0, "lock": threading.Lock()}
+
+def check_job_access(job_id, client_ip):
+    """Check if client has access to job (basic ownership check)"""
+    if job_id not in job_owners:
+        return False
+    # In production, use proper user authentication instead of IP
+    return job_owners[job_id] == client_ip or not REQUIRE_AUTH
+
+# Rate limiting per IP
+ip_request_counts = {}
+ip_lock = threading.Lock()
+MAX_REQUESTS_PER_IP_PER_HOUR = 100
+
+def check_rate_limit(ip):
+    """Check if IP has exceeded rate limit"""
+    with ip_lock:
+        current_time = time.time()
+        if ip not in ip_request_counts:
+            ip_request_counts[ip] = []
+        
+        # Remove requests older than 1 hour
+        ip_request_counts[ip] = [t for t in ip_request_counts[ip] if current_time - t < 3600]
+        
+        if len(ip_request_counts[ip]) >= MAX_REQUESTS_PER_IP_PER_HOUR:
+            return False
+        
+        ip_request_counts[ip].append(current_time)
+        return True
 
 # Tool registry
 SUPPORTED_TOOLS = {
@@ -52,6 +103,12 @@ def validate_target(target):
     # Basic validation - extend with actual registry check
     if not target or len(target) > 253:
         return False, "Invalid target format"
+    
+    # Sanitize input - only allow alphanumeric, dots, hyphens, and colons
+    import string
+    allowed_chars = string.ascii_letters + string.digits + '.-:'
+    if not all(c in allowed_chars for c in target):
+        return False, "Invalid characters in target"
     
     # Block private IPs and localhost
     try:
@@ -90,9 +147,10 @@ def run_scan_async(job_id, tool, scan_function, *args, **kwargs):
         
     except Exception as e:
         scan_jobs[job_id]["status"] = "failed"
-        scan_jobs[job_id]["error"] = str(e)
+        scan_jobs[job_id]["error"] = "Scan failed - check server logs for details"
         scan_jobs[job_id]["completed_at"] = datetime.utcnow().isoformat()
         logger.error(f"Failed {tool} scan for job {job_id}: {str(e)}")
+        logger.exception("Full error details:")
     finally:
         with active_scans["lock"]:
             active_scans["count"] -= 1
@@ -100,15 +158,37 @@ def run_scan_async(job_id, tool, scan_function, *args, **kwargs):
 # Common API Contract Endpoints
 
 @app.route('/scan', methods=['POST'])
+@require_api_key
 def create_scan():
     """Common scan endpoint - POST /scan"""
+    # Validate content type
+    if not request.is_json:
+        return jsonify({"error": "Content-Type must be application/json"}), 400
+    
+    # Rate limiting
+    client_ip = request.remote_addr
+    if not check_rate_limit(client_ip):
+        return jsonify({
+            "error": "Rate limit exceeded",
+            "message": f"Maximum {MAX_REQUESTS_PER_IP_PER_HOUR} requests per hour allowed"
+        }), 429
+    
     data = request.get_json()
     if not data:
         return jsonify({"error": "JSON payload required"}), 400
     
+    # Validate only expected fields to prevent mass assignment
+    allowed_fields = {'tool', 'target', 'params'}
+    if not set(data.keys()).issubset(allowed_fields):
+        return jsonify({"error": "Invalid fields in request"}), 400
+    
     tool = data.get('tool')
     target = data.get('target')
     params = data.get('params', {})
+    
+    # Validate params is a dictionary
+    if not isinstance(params, dict):
+        return jsonify({"error": "params must be an object"}), 400
     
     if not tool or tool not in SUPPORTED_TOOLS:
         return jsonify({
@@ -143,6 +223,7 @@ def create_scan():
         "created_at": datetime.utcnow().isoformat(),
         "result": None
     }
+    job_owners[job_id] = client_ip  # Track ownership
     cleanup_old_jobs()
     
     # Start scan based on tool
@@ -167,19 +248,29 @@ def create_scan():
     }), 202
 
 @app.route('/status/<job_id>', methods=['GET'])
+@require_api_key
 def get_job_status(job_id):
     """Get scan status - GET /status/{job_id}"""
     if job_id not in scan_jobs:
         return jsonify({"error": "Job not found"}), 404
     
+    # Check job access
+    if not check_job_access(job_id, request.remote_addr):
+        return jsonify({"error": "Access denied"}), 403
+    
     job = scan_jobs[job_id].copy()
     return jsonify(job), 200
 
 @app.route('/results/<job_id>', methods=['GET'])
+@require_api_key
 def get_job_results(job_id):
     """Get scan results - GET /results/{job_id}"""
     if job_id not in scan_jobs:
         return jsonify({"error": "Job not found"}), 404
+    
+    # Check job access
+    if not check_job_access(job_id, request.remote_addr):
+        return jsonify({"error": "Access denied"}), 403
     
     job = scan_jobs[job_id]
     if job["status"] != "completed":
@@ -198,10 +289,15 @@ def get_job_results(job_id):
     }), 200
 
 @app.route('/cancel/<job_id>', methods=['POST'])
+@require_api_key
 def cancel_job(job_id):
     """Cancel scan - POST /cancel/{job_id}"""
     if job_id not in scan_jobs:
         return jsonify({"error": "Job not found"}), 404
+    
+    # Check job access
+    if not check_job_access(job_id, request.remote_addr):
+        return jsonify({"error": "Access denied"}), 403
     
     job = scan_jobs[job_id]
     if job["status"] in ["completed", "failed", "cancelled"]:
@@ -217,6 +313,7 @@ def cancel_job(job_id):
     }), 200
 
 @app.route('/jobs', methods=['GET'])
+@require_api_key
 def list_jobs():
     """List all jobs"""
     limit = request.args.get('limit', 50, type=int)
@@ -300,6 +397,7 @@ def run_wafw00f(target, params):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as tmp_file:
             output_path = tmp_file.name
 
+        # Command is already using list format which prevents shell injection
         command = ['wafw00f', target, '-o', output_path]
         result = subprocess.run(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
@@ -755,9 +853,9 @@ def run_gvm(target, params):
         from gvm.errors import GvmError
         import xml.etree.ElementTree as ET
         
-        # Hardcoded credentials
-        username = 'admeen'
-        password = 'admin123'
+        # Get credentials from environment or use defaults (should be configured externally)
+        username = os.environ.get('GVM_USERNAME', 'admin')
+        password = os.environ.get('GVM_PASSWORD', 'admin')
         
         # Connection parameters
         use_tls = params.get('use_tls', False)
@@ -810,14 +908,10 @@ def run_gvm(target, params):
                     
             except (GvmError, ConnectionError, OSError) as e:
                 if attempt == max_retries - 1:
+                    logger.error(f"GVM connection failed after {max_retries} attempts: {str(e)}")
                     return {
-                        "error": f"GVM connection failed after {max_retries} attempts: {str(e)}",
-                        "type": "connection_error",
-                        "troubleshooting": {
-                            "check_gvm_status": "sudo systemctl status gvmd",
-                            "restart_gvm": "sudo systemctl restart gvmd",
-                            "check_socket": f"ls -la {socket_found if not use_tls else 'N/A'}"
-                        }
+                        "error": "GVM connection failed - check server logs for details",
+                        "type": "connection_error"
                     }
                 time.sleep(2 ** attempt)  # Exponential backoff
                 continue
@@ -828,14 +922,9 @@ def run_gvm(target, params):
             "solution": "Run: pip install python-gvm"
         }
     except Exception as e:
+        logger.error(f"OpenVAS scan failed: {str(e)}")
         return {
-            "error": f"OpenVAS scan failed: {str(e)}",
-            "troubleshooting": {
-                "check_gvm_status": "sudo systemctl status gvmd",
-                "start_gvm": "sudo systemctl start gvmd",
-                "check_socket": "ls -la /run/gvmd/gvmd.sock",
-                "check_credentials": "Verify GVM user 'admeen' exists with password 'admin123'"
-            }
+            "error": "OpenVAS scan failed - check server logs for details"
         }
 
 def _perform_gvm_scan(gmp, target, params):
@@ -1022,5 +1111,22 @@ def _perform_gvm_scan(gmp, target, params):
             "error": f"OpenVAS scan failed: {str(e)}"
         }
 
+@app.after_request
+def add_security_headers(response):
+    """Add security headers to all responses"""
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    response.headers['Content-Security-Policy'] = "default-src 'self'"
+    # CORS - only allow https://conp.com
+    allowed_origin = os.environ.get('ALLOWED_ORIGIN', 'https://comp.com')
+    response.headers['Access-Control-Allow-Origin'] = allowed_origin
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key'
+    return response
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+    # Disable debug mode in production
+    debug_mode = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
+    app.run(host='0.0.0.0', port=5000, threaded=True, debug=debug_mode)
