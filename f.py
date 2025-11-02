@@ -1121,8 +1121,8 @@ def add_security_headers(response):
     response.headers['X-XSS-Protection'] = '1; mode=block'
     response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
     response.headers['Content-Security-Policy'] = "default-src 'self'"
-    # CORS - only allow https://encoderspro.com
-    allowed_origin = os.environ.get('ALLOWED_ORIGIN', 'https://encoderspro.com')
+    # CORS - only allow https://comp.com
+    allowed_origin = os.environ.get('ALLOWED_ORIGIN', 'https://comp.com')
     response.headers['Access-Control-Allow-Origin'] = allowed_origin
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key'
