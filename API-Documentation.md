@@ -25,6 +25,16 @@ The Security Scanner API is an asynchronous Flask-based REST API that provides a
 - Concurrent scan limits (max 5 simultaneous)
 - Clean JSON responses with 4-space indentation
 - Health monitoring and metrics
+- Enhanced security (SSRF protection, injection detection, timing-attack resistant auth)
+
+**Security Features:**
+- ✅ Timing-attack resistant authentication
+- ✅ Enhanced SSRF protection (blocks AWS/Azure/Alibaba metadata IPs)
+- ✅ Injection pattern detection (shell metacharacters, commands)
+- ✅ API key-based job ownership (not IP-based)
+- ✅ Comprehensive security headers
+- ✅ Rate limiting (100 req/hour per IP)
+- ✅ Audit logging for security events
 
 ---
 
@@ -41,27 +51,71 @@ python f.py
 
 ### Basic Usage
 ```bash
-# Start a scan
+# Start a scan (with authentication)
 curl -X POST http://127.0.0.1:5000/scan \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
   -d '{"tool": "nuclei", "target": "example.com"}'
 
 # Check status
-curl http://127.0.0.1:5000/status/{job_id}
+curl -H "X-API-Key: your-api-key" \
+  http://127.0.0.1:5000/status/{job_id}
 
 # Get results
-curl http://127.0.0.1:5000/results/{job_id}
+curl -H "X-API-Key: your-api-key" \
+  http://127.0.0.1:5000/results/{job_id}
 ```
 
 ---
 
 ## Authentication
 
+### API Key Authentication
+
+When `REQUIRE_AUTH=true`, all endpoints (except `/health` and `/metrics`) require an API key.
+
+**Header:**
+```
+X-API-Key: your-api-key-here
+```
+
+**Example:**
+```bash
+curl -H "X-API-Key: your-key" http://localhost:5000/scan ...
+```
+
+**Security Features:**
+- ✅ Timing-attack resistant comparison using `hmac.compare_digest()`
+- ✅ API keys hashed with SHA256
+- ✅ Job ownership tracked by API key hash (not IP)
+- ✅ Failed attempts logged to audit.log
+
+### Rate Limiting
+- **Limit:** 100 requests per hour per IP
+- **Response:** 429 Too Many Requests when exceeded
+
 ### Concurrent Scans
 - **Maximum:** 5 simultaneous scans
-- **Error Response:** Returns 429 when limit exceeded
+- **Response:** 429 when limit exceeded
 
 ### Error Responses
+
+**Unauthorized:**
+```json
+{
+    "error": "Unauthorized - Invalid or missing API key"
+}
+```
+
+**Rate Limit:**
+```json
+{
+    "error": "Rate limit exceeded",
+    "message": "Maximum 100 requests per hour allowed"
+}
+```
+
+**Concurrent Limit:**
 ```json
 {
     "error": "Maximum concurrent scans reached",
@@ -155,6 +209,7 @@ Start a new security scan.
 ```bash
 curl -X POST http://127.0.0.1:5000/scan \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
   -d '{
     "tool": "nmap",
     "target": "scanme.nmap.org",
@@ -250,13 +305,42 @@ Port scanning and service detection.
 ```
 
 ### 3. Vulnerability Scanning (nuclei)
-Template-based vulnerability detection.
+Template-based vulnerability detection with extensive filtering options.
 
-**Usage:**
+**Parameters:**
+- `severity`: Filter by severity (critical, high, medium, low, info, unknown)
+- `tags`: Run templates with specific tags (cve, owasp, xss, sqli, etc.)
+- `exclude_tags`: Exclude templates with specific tags
+- `templates`: Specific templates to use
+- `exclude_templates`: Templates to exclude
+- `rate_limit`: Requests per second (default: 150)
+- `concurrency`: Parallel templates (default: 25)
+- `timeout`: Template timeout in seconds (default: 5)
+- `retries`: Number of retries (default: 1)
+- `follow_redirects`: Follow HTTP redirects (boolean)
+- `include_all`: Include all results (boolean)
+- `passive`: Passive scan only (boolean)
+- `automatic_scan`: Use automatic scan mode (boolean)
+
+**Basic Usage:**
 ```json
 {
     "tool": "nuclei",
     "target": "example.com"
+}
+```
+
+**Advanced Usage with Filters:**
+```json
+{
+    "tool": "nuclei",
+    "target": "example.com",
+    "params": {
+        "severity": "critical,high",
+        "tags": "cve,owasp",
+        "rate_limit": 50,
+        "concurrency": 20
+    }
 }
 ```
 
@@ -266,18 +350,59 @@ Template-based vulnerability detection.
     "tool": "nuclei",
     "target": "example.com",
     "target_url": "http://example.com",
-    "command": "nuclei -u http://example.com -j",
+    "command": "nuclei -u http://example.com -j -severity critical,high -tags cve,owasp",
     "results": [
         {
-            "template-id": "tech-detect",
-            "info": {"name": "Technology Detection"},
-            "matched-at": "http://example.com",
-            "extracted-results": ["nginx/1.18.0"]
+            "template-id": "CVE-2023-12345",
+            "info": {
+                "name": "Example Vulnerability",
+                "severity": "critical",
+                "tags": ["cve", "rce"]
+            },
+            "matched-at": "http://example.com/vulnerable",
+            "type": "http"
         }
     ],
-    "total_findings": 1
+    "total_findings": 1,
+    "severity_summary": {
+        "critical": 1,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "info": 0,
+        "unknown": 0
+    }
 }
 ```
+
+**Common Scan Scenarios:**
+
+1. **Critical/High Severity Only:**
+```json
+{"tool": "nuclei", "target": "example.com", "params": {"severity": "critical,high"}}
+```
+
+2. **CVE-Based Scan:**
+```json
+{"tool": "nuclei", "target": "example.com", "params": {"tags": "cve"}}
+```
+
+3. **OWASP Top 10:**
+```json
+{"tool": "nuclei", "target": "example.com", "params": {"tags": "owasp"}}
+```
+
+4. **Injection Vulnerabilities:**
+```json
+{"tool": "nuclei", "target": "example.com", "params": {"tags": "xss,sqli,rce"}}
+```
+
+5. **Stealthy Scan:**
+```json
+{"tool": "nuclei", "target": "example.com", "params": {"rate_limit": 10, "concurrency": 5}}
+```
+
+For detailed parameter documentation, see [NUCLEI_PARAMS.md](NUCLEI_PARAMS.md)
 
 ### 4. Directory Enumeration (dirb)
 Discovers hidden directories and files.
@@ -525,7 +650,8 @@ Comprehensive vulnerability scanning using OpenVAS engine.
 - `port`: GVM port for TLS connection (default: 9390)
 
 **Note:** 
-- Credentials are hardcoded (username: admeen, password: admin123)
+- Credentials from environment variables (GVM_USERNAME, GVM_PASSWORD)
+- Default: username=admin, password=admin
 - GVM scans run without timeout until completion
 - Progress is logged to server console
 
@@ -597,7 +723,8 @@ List all scan jobs with optional filtering.
 
 **Example:**
 ```bash
-curl "http://127.0.0.1:5000/jobs?limit=10&status=completed"
+curl -H "X-API-Key: your-api-key" \
+  "http://127.0.0.1:5000/jobs?limit=10&status=completed"
 ```
 
 **Response:**
