@@ -9,6 +9,8 @@ import logging
 import threading
 import uuid
 import time
+import hmac
+import hashlib
 from datetime import datetime
 from collections import OrderedDict
 
@@ -32,31 +34,47 @@ API_KEY = os.environ.get('API_KEY', None)  # Set via environment variable
 REQUIRE_AUTH = os.environ.get('REQUIRE_AUTH', 'false').lower() == 'true'
 
 def require_api_key(f):
-    """Decorator to require API key authentication"""
+    """Decorator to require API key authentication with timing-attack resistance"""
     from functools import wraps
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if REQUIRE_AUTH:
             api_key = request.headers.get('X-API-Key')
-            if not api_key or api_key != API_KEY:
+            if not api_key:
                 audit_logger.warning(f"Unauthorized access attempt from {request.remote_addr} to {request.path}")
                 return jsonify({"error": "Unauthorized - Invalid or missing API key"}), 401
+            
+            # Timing-attack resistant comparison
+            provided_hash = hashlib.sha256(api_key.encode()).hexdigest()
+            stored_hash = hashlib.sha256(API_KEY.encode()).hexdigest() if API_KEY else ''
+            
+            if not hmac.compare_digest(provided_hash, stored_hash):
+                audit_logger.warning(f"Unauthorized access attempt from {request.remote_addr} to {request.path}")
+                return jsonify({"error": "Unauthorized - Invalid or missing API key"}), 401
+            
+            # Store API key hash for ownership tracking
+            request.api_key_hash = provided_hash[:8]
         return f(*args, **kwargs)
     return decorated_function
 
 # Job management
 scan_jobs = OrderedDict()
-job_owners = {}  # Track job ownership by IP
+job_owners = {}  # Track job ownership by API key hash
 MAX_JOBS_HISTORY = 1000
 MAX_CONCURRENT_SCANS = 5
 active_scans = {"count": 0, "lock": threading.Lock()}
 
-def check_job_access(job_id, client_ip):
-    """Check if client has access to job (basic ownership check)"""
+def get_owner_id():
+    """Get current owner ID (API key hash or IP)"""
+    if REQUIRE_AUTH and hasattr(request, 'api_key_hash'):
+        return request.api_key_hash
+    return request.remote_addr
+
+def check_job_access(job_id):
+    """Check if current user has access to job"""
     if job_id not in job_owners:
         return False
-    # In production, use proper user authentication instead of IP
-    return job_owners[job_id] == client_ip or not REQUIRE_AUTH
+    return job_owners[job_id] == get_owner_id() or not REQUIRE_AUTH
 
 # Rate limiting per IP
 ip_request_counts = {}
@@ -99,25 +117,62 @@ def clean_ansi_codes(text):
     return ansi_escape.sub('', text)
 
 def validate_target(target):
-    """Validate target against scope registry"""
-    # Basic validation - extend with actual registry check
+    """Validate target with enhanced SSRF protection and injection detection"""
     if not target or len(target) > 253:
         return False, "Invalid target format"
     
-    # Sanitize input - only allow alphanumeric, dots, hyphens, and colons
-    import string
-    allowed_chars = string.ascii_letters + string.digits + '.-:'
-    if not all(c in allowed_chars for c in target):
+    # Character validation - allow only safe characters
+    safe_pattern = r'^[a-zA-Z0-9.\-:/]+$'
+    if not re.match(safe_pattern, target):
         return False, "Invalid characters in target"
     
-    # Block private IPs and localhost
+    # Injection pattern detection
+    injection_patterns = [
+        r'[;|&`$()\\<>]',  # Shell metacharacters
+        r'(?:^|\s)(?:cat|rm|chmod|wget|curl|exec|eval|bash|sh|cmd)\b',  # Commands
+        r'(?:\r\n|\n|\r)',  # Newlines
+    ]
+    for pattern in injection_patterns:
+        if re.search(pattern, target, re.IGNORECASE):
+            return False, "Injection attempt detected"
+    
+    # Enhanced SSRF protection
+    import ipaddress
+    
+    # Metadata service IPs
+    METADATA_IPS = ['169.254.169.254', '168.63.169.254', '100.100.100.200']
+    
+    # Extract host (remove port if present)
+    target_host = target.split(':')[0]
+    
+    # Check if target is an IP
     try:
-        import ipaddress
-        ip = ipaddress.ip_address(target)
-        if ip.is_private or ip.is_loopback:
-            return False, "Private/localhost targets not allowed"
-    except:
-        pass  # Not an IP, continue with domain validation
+        ip = ipaddress.ip_address(target_host)
+        
+        # Block private IPs
+        if ip.is_private or ip.is_loopback or ip.is_reserved:
+            return False, "SSRF Protection: Private/internal IP not allowed"
+        
+        # Block metadata services
+        if str(ip) in METADATA_IPS:
+            return False, "SSRF Protection: Metadata service blocked"
+    
+    except ValueError:
+        # Not an IP, check DNS resolution
+        try:
+            resolved = socket.gethostbyname(target_host)
+            resolved_ip = ipaddress.ip_address(resolved)
+            
+            # Check if resolves to private IP
+            if resolved_ip.is_private or resolved_ip.is_loopback:
+                return False, "SSRF Protection: Domain resolves to private IP"
+            
+            # Check if resolves to metadata service
+            if resolved in METADATA_IPS:
+                return False, "SSRF Protection: Domain resolves to metadata service"
+        
+        except (socket.gaierror, socket.error):
+            pass  # DNS resolution failed, allow it
     
     return True, "Valid target"
 
@@ -223,7 +278,7 @@ def create_scan():
         "created_at": datetime.utcnow().isoformat(),
         "result": None
     }
-    job_owners[job_id] = client_ip  # Track ownership
+    job_owners[job_id] = get_owner_id()  # Track ownership
     cleanup_old_jobs()
     
     # Start scan based on tool
@@ -255,7 +310,8 @@ def get_job_status(job_id):
         return jsonify({"error": "Job not found"}), 404
     
     # Check job access
-    if not check_job_access(job_id, request.remote_addr):
+    if not check_job_access(job_id):
+        audit_logger.warning(f"Unauthorized job access attempt: {get_owner_id()} -> {job_id}")
         return jsonify({"error": "Access denied"}), 403
     
     job = scan_jobs[job_id].copy()
@@ -269,7 +325,8 @@ def get_job_results(job_id):
         return jsonify({"error": "Job not found"}), 404
     
     # Check job access
-    if not check_job_access(job_id, request.remote_addr):
+    if not check_job_access(job_id):
+        audit_logger.warning(f"Unauthorized job access attempt: {get_owner_id()} -> {job_id}")
         return jsonify({"error": "Access denied"}), 403
     
     job = scan_jobs[job_id]
@@ -296,7 +353,8 @@ def cancel_job(job_id):
         return jsonify({"error": "Job not found"}), 404
     
     # Check job access
-    if not check_job_access(job_id, request.remote_addr):
+    if not check_job_access(job_id):
+        audit_logger.warning(f"Unauthorized job access attempt: {get_owner_id()} -> {job_id}")
         return jsonify({"error": "Access denied"}), 403
     
     job = scan_jobs[job_id]
@@ -446,7 +504,7 @@ def run_nmap(target, params):
         return {"error": str(e)}
 
 def run_nuclei(target, params):
-    """Vulnerability scanning"""
+    """Vulnerability scanning with optional parameters"""
     try:
         if not target.startswith(('http://', 'https://')):
             target_url = f'http://{target}'
@@ -454,6 +512,89 @@ def run_nuclei(target, params):
             target_url = target
 
         command = ['nuclei', '-u', target_url, '-j']
+        
+        # Severity filter: critical, high, medium, low, info, unknown
+        severity = params.get('severity')
+        if severity:
+            valid_severities = ['critical', 'high', 'medium', 'low', 'info', 'unknown']
+            if isinstance(severity, str):
+                severity = [s.strip().lower() for s in severity.split(',')]
+            elif not isinstance(severity, list):
+                severity = [str(severity).lower()]
+            
+            # Validate severities
+            severity = [s for s in severity if s in valid_severities]
+            if severity:
+                command.extend(['-severity', ','.join(severity)])
+        
+        # Tags filter (e.g., 'cve', 'owasp', 'xss', 'sqli')
+        tags = params.get('tags')
+        if tags:
+            if isinstance(tags, list):
+                tags = ','.join(tags)
+            command.extend(['-tags', str(tags)])
+        
+        # Exclude tags
+        exclude_tags = params.get('exclude_tags')
+        if exclude_tags:
+            if isinstance(exclude_tags, list):
+                exclude_tags = ','.join(exclude_tags)
+            command.extend(['-exclude-tags', str(exclude_tags)])
+        
+        # Templates to use (specific template paths or IDs)
+        templates = params.get('templates')
+        if templates:
+            if isinstance(templates, list):
+                for template in templates:
+                    command.extend(['-t', str(template)])
+            else:
+                command.extend(['-t', str(templates)])
+        
+        # Exclude templates
+        exclude_templates = params.get('exclude_templates')
+        if exclude_templates:
+            if isinstance(exclude_templates, list):
+                for template in exclude_templates:
+                    command.extend(['-exclude', str(template)])
+            else:
+                command.extend(['-exclude', str(exclude_templates)])
+        
+        # Rate limit (requests per second)
+        rate_limit = params.get('rate_limit')
+        if rate_limit:
+            command.extend(['-rate-limit', str(rate_limit)])
+        
+        # Concurrency (parallel templates)
+        concurrency = params.get('concurrency')
+        if concurrency:
+            command.extend(['-c', str(concurrency)])
+        
+        # Timeout (seconds)
+        timeout = params.get('timeout')
+        if timeout:
+            command.extend(['-timeout', str(timeout)])
+        
+        # Retries
+        retries = params.get('retries')
+        if retries:
+            command.extend(['-retries', str(retries)])
+        
+        # Follow redirects
+        if params.get('follow_redirects', False):
+            command.append('-follow-redirects')
+        
+        # Include all matched results
+        if params.get('include_all', False):
+            command.append('-include-all')
+        
+        # Passive scan only
+        if params.get('passive', False):
+            command.append('-passive')
+        
+        # Automatic scan (uses default templates)
+        if params.get('automatic_scan', False):
+            command.append('-as')
+        
         result = subprocess.run(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
@@ -466,6 +607,21 @@ def run_nuclei(target, params):
                         nuclei_results.append(json.loads(line))
                     except json.JSONDecodeError:
                         continue
+        
+        # Calculate severity summary
+        severity_summary = {
+            'critical': 0,
+            'high': 0,
+            'medium': 0,
+            'low': 0,
+            'info': 0,
+            'unknown': 0
+        }
+        
+        for result_item in nuclei_results:
+            severity_level = result_item.get('info', {}).get('severity', 'unknown').lower()
+            if severity_level in severity_summary:
+                severity_summary[severity_level] += 1
 
         return {
             "tool": "nuclei",
@@ -473,7 +629,8 @@ def run_nuclei(target, params):
             "target_url": target_url,
             "command": " ".join(command),
             "results": nuclei_results,
-            "total_findings": len(nuclei_results)
+            "total_findings": len(nuclei_results),
+            "severity_summary": severity_summary
         }
     except Exception as e:
         return {"error": str(e)}
@@ -1115,20 +1272,45 @@ def _perform_gvm_scan(gmp, target, params):
 
 @app.after_request
 def add_security_headers(response):
-    """Add security headers to all responses"""
+    """Add comprehensive security headers to all responses"""
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['X-XSS-Protection'] = '1; mode=block'
-    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains; preload'
     response.headers['Content-Security-Policy'] = "default-src 'self'"
-    # CORS - only allow https://comp.com
-    allowed_origin = os.environ.get('ALLOWED_ORIGIN', 'https://comp.com')
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
+    
+    # CORS - only allow https://company.com
+    allowed_origin = os.environ.get('ALLOWED_ORIGIN', 'https://company.com')
     response.headers['Access-Control-Allow-Origin'] = allowed_origin
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key'
+    response.headers['Access-Control-Max-Age'] = '86400'
+    response.headers['Access-Control-Allow-Credentials'] = 'false'
+    
     return response
 
 if __name__ == '__main__':
+    # Validate configuration
+    if REQUIRE_AUTH and not API_KEY:
+        logger.error("CRITICAL: REQUIRE_AUTH=true but API_KEY not set!")
+        logger.error("Set API_KEY environment variable or disable authentication")
+        exit(1)
+    
     # Disable debug mode in production
     debug_mode = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
+    
+    # Startup info
+    logger.info("="*60)
+    logger.info("Security Scanner API - Starting...")
+    logger.info("="*60)
+    logger.info(f"Authentication: {'ENABLED' if REQUIRE_AUTH else 'DISABLED'}")
+    logger.info(f"CORS Origin: {os.environ.get('ALLOWED_ORIGIN', 'https://company.com')}")
+    logger.info(f"Debug Mode: {debug_mode}")
+    logger.info(f"Enhanced SSRF Protection: ENABLED")
+    logger.info(f"Injection Detection: ENABLED")
+    logger.info(f"Timing-Attack Protection: ENABLED")
+    logger.info("="*60)
+    
     app.run(host='0.0.0.0', port=5000, threaded=True, debug=debug_mode)
