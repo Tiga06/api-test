@@ -57,8 +57,6 @@ python f.py
 
 Server runs on `http://0.0.0.0:5000`
 
-**Security Note**: See [SECURITY.md](SECURITY.md) for detailed security configuration.
-
 ## Common API Contract
 
 ### Start Scan
@@ -101,7 +99,7 @@ curl -X POST http://localhost:5000/cancel/{job_id} \
 - **nikto** - Web Vulnerability Scanner
 - **masscan** - Port Scanner (params: ports, rate)
 - **sslscan** - SSL/TLS Security Scanner (params: port)
-- **httpx** - HTTP Probing & Host Verification (params: screenshot, include_response, follow_redirects)
+- **httpx** - HTTP Probing & Host Verification (params: status_code, title, tech_detect, ip, cdn, method, websocket, cname, asn, content_length, response_time, web_server, follow_redirects, include_response, screenshot, probe, threads, rate_limit, timeout, retries, match_code, filter_code)
 - **gvm** - OpenVAS Vulnerability Scanner (no timeout - runs until completion)
 
 ## Management Endpoints
