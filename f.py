@@ -1363,8 +1363,8 @@ def add_security_headers(response):
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
     response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
     
-    # CORS - only allow https://encoderspro.com
-    allowed_origin = os.environ.get('ALLOWED_ORIGIN', 'https://encoderspro.com')
+    # CORS - only allow https://compani.com
+    allowed_origin = os.environ.get('ALLOWED_ORIGIN', 'https://compani.com')
     response.headers['Access-Control-Allow-Origin'] = allowed_origin
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key'
@@ -1388,7 +1388,7 @@ if __name__ == '__main__':
     logger.info("Security Scanner API - Starting...")
     logger.info("="*60)
     logger.info(f"Authentication: {'ENABLED' if REQUIRE_AUTH else 'DISABLED'}")
-    logger.info(f"CORS Origin: {os.environ.get('ALLOWED_ORIGIN', 'https://encoderspro.com')}")
+    logger.info(f"CORS Origin: {os.environ.get('ALLOWED_ORIGIN', 'https://compani.com')}")
     logger.info(f"Debug Mode: {debug_mode}")
     logger.info(f"Enhanced SSRF Protection: ENABLED")
     logger.info(f"Injection Detection: ENABLED")
