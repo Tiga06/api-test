@@ -914,22 +914,104 @@ def run_sslscan(target, params):
         return {"error": str(e)}
 
 def run_httpx(target, params):
-    """HTTP probing and host verification"""
+    """HTTP probing and host verification with optional parameters"""
     try:
-        # Build httpx command with comprehensive probing
-        command = [
-            'httpx', '-json', '-probe', '-status-code', '-title', 
-            '-tech-detect', '-ip', '-cdn', '-method', '-websocket',
-            '-cname', '-asn', '-silent'
-        ]
+        # Base command
+        command = ['httpx', '-json', '-silent']
         
-        # Add optional parameters
-        if params.get('screenshot'):
-            command.extend(['-screenshot'])
-        if params.get('include_response'):
-            command.extend(['-include-response'])
-        if params.get('follow_redirects'):
-            command.extend(['-follow-redirects'])
+        # Status code (default: enabled)
+        if params.get('status_code', True):
+            command.append('-status-code')
+        
+        # Title extraction (default: enabled)
+        if params.get('title', True):
+            command.append('-title')
+        
+        # Technology detection (default: enabled)
+        if params.get('tech_detect', True):
+            command.append('-tech-detect')
+        
+        # IP address (default: enabled)
+        if params.get('ip', True):
+            command.append('-ip')
+        
+        # CDN detection (default: enabled)
+        if params.get('cdn', True):
+            command.append('-cdn')
+        
+        # HTTP method (default: enabled)
+        if params.get('method', True):
+            command.append('-method')
+        
+        # WebSocket detection
+        if params.get('websocket', False):
+            command.append('-websocket')
+        
+        # CNAME
+        if params.get('cname', False):
+            command.append('-cname')
+        
+        # ASN
+        if params.get('asn', False):
+            command.append('-asn')
+        
+        # Content length
+        if params.get('content_length', False):
+            command.append('-content-length')
+        
+        # Response time
+        if params.get('response_time', False):
+            command.append('-response-time')
+        
+        # Web server
+        if params.get('web_server', False):
+            command.append('-web-server')
+        
+        # Follow redirects
+        if params.get('follow_redirects', False):
+            command.append('-follow-redirects')
+        
+        # Include response body
+        if params.get('include_response', False):
+            command.append('-include-response')
+        
+        # Screenshot
+        if params.get('screenshot', False):
+            command.append('-screenshot')
+        
+        # Probe (default: enabled)
+        if params.get('probe', True):
+            command.append('-probe')
+        
+        # Threads/concurrency
+        threads = params.get('threads')
+        if threads:
+            command.extend(['-threads', str(threads)])
+        
+        # Rate limit (requests per second)
+        rate_limit = params.get('rate_limit')
+        if rate_limit:
+            command.extend(['-rate-limit', str(rate_limit)])
+        
+        # Timeout (seconds)
+        timeout = params.get('timeout')
+        if timeout:
+            command.extend(['-timeout', str(timeout)])
+        
+        # Retries
+        retries = params.get('retries')
+        if retries:
+            command.extend(['-retries', str(retries)])
+        
+        # Match status code
+        match_code = params.get('match_code')
+        if match_code:
+            command.extend(['-match-code', str(match_code)])
+        
+        # Filter status code
+        filter_code = params.get('filter_code')
+        if filter_code:
+            command.extend(['-filter-code', str(filter_code)])
         
         # Create temporary input file for target
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".txt") as tmp_file:
@@ -1281,8 +1363,8 @@ def add_security_headers(response):
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
     response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
     
-    # CORS - only allow https://company.com
-    allowed_origin = os.environ.get('ALLOWED_ORIGIN', 'https://company.com')
+    # CORS - only allow https://encoderspro.com
+    allowed_origin = os.environ.get('ALLOWED_ORIGIN', 'https://encoderspro.com')
     response.headers['Access-Control-Allow-Origin'] = allowed_origin
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key'
@@ -1306,7 +1388,7 @@ if __name__ == '__main__':
     logger.info("Security Scanner API - Starting...")
     logger.info("="*60)
     logger.info(f"Authentication: {'ENABLED' if REQUIRE_AUTH else 'DISABLED'}")
-    logger.info(f"CORS Origin: {os.environ.get('ALLOWED_ORIGIN', 'https://company.com')}")
+    logger.info(f"CORS Origin: {os.environ.get('ALLOWED_ORIGIN', 'https://encoderspro.com')}")
     logger.info(f"Debug Mode: {debug_mode}")
     logger.info(f"Enhanced SSRF Protection: ENABLED")
     logger.info(f"Injection Detection: ENABLED")
