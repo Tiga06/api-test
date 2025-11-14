@@ -591,9 +591,21 @@ SSL/TLS configuration analysis.
 Comprehensive HTTP/HTTPS probing with technology detection.
 
 **Parameters:**
-- `screenshot`: Take screenshots (boolean)
-- `include_response`: Include full HTTP response (boolean)
-- `follow_redirects`: Follow redirect chains (boolean)
+
+**Detection (default: enabled):**
+- `status_code`, `title`, `tech_detect`, `ip`, `cdn`, `method`, `probe`
+
+**Additional Detection:**
+- `websocket`, `cname`, `asn`, `content_length`, `response_time`, `web_server`
+
+**Behavior:**
+- `follow_redirects`, `include_response`, `screenshot`
+
+**Performance:**
+- `threads`, `rate_limit`, `timeout`, `retries`
+
+**Filtering:**
+- `match_code`, `filter_code`
 
 **Usage:**
 ```json
